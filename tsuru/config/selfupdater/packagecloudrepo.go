@@ -1,3 +1,7 @@
+// Copyright 2022 tsuru-client authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package selfupdater
 
 import (
@@ -7,11 +11,20 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
+
+	"github.com/tsuru/tsuru-client/tsuru/config/diff"
+	"github.com/tsuru/tsuru/fs"
 )
 
 const (
 	debRE string = `(?P<pre>^deb(-src)?.* )(?P<url>https://packagecloud\.io/tsuru/\w+/)(?P<os>\w+)(?P<sep>/? )(?P<dist>[0-9A-Za-z.]+)(?P<end> main.*$)`
 	rpmRE string = `(?P<pre>^baseurl=)(?P<url>https://packagecloud\.io/tsuru/\w+/)(?P<os>\w+)(?P<sep>/)(?P<dist>[0-9A-Za-z.]+)(?P<end>/.*$)`
+)
+
+var (
+	stdin   io.ReadWriter = os.Stdin
+	fsystem fs.Fs         = fs.OsFs{}
 )
 
 func reFindSubmatchMap(r *regexp.Regexp, data string) map[string]string {
@@ -25,14 +38,14 @@ func reFindSubmatchMap(r *regexp.Regexp, data string) map[string]string {
 	return matchMap
 }
 
-func findConfRepoPath() (string, string) {
-	if _, err := os.Stat("/etc/apt/sources.list.d/tsuru_stable.list"); err == nil {
+func findConfRepoPath() (repoType string, filepath string) {
+	if _, err := fsystem.Stat("/etc/apt/sources.list.d/tsuru_stable.list"); err == nil {
 		return "deb", "/etc/apt/sources.list.d/tsuru_stable.list"
 	}
-	if _, err := os.Stat("/etc/zypp/repos.d/tsuru_stable.repo"); err == nil {
+	if _, err := fsystem.Stat("/etc/zypp/repos.d/tsuru_stable.repo"); err == nil {
 		return "rpm", "/etc/zypp/repos.d/tsuru_stable.repo"
 	}
-	if _, err := os.Stat("/etc/yum.repos.d/tsuru_stable.repo"); err == nil {
+	if _, err := fsystem.Stat("/etc/yum.repos.d/tsuru_stable.repo"); err == nil {
 		return "rpm", "/etc/yum.repos.d/tsuru_stable.repo"
 	}
 	return "", ""
@@ -43,7 +56,7 @@ func replaceConfLine(r *regexp.Regexp, line string) (wasReplaced bool, replacedL
 	m := reFindSubmatchMap(r, line)
 	if len(m) > 0 {
 		for _, k := range []string{"pre", "url", "os", "sep", "dist", "end"} {
-			if v, _ := m[k]; v == "" {
+			if v := m[k]; v == "" {
 				return false, line
 			}
 		}
@@ -55,7 +68,7 @@ func replaceConfLine(r *regexp.Regexp, line string) (wasReplaced bool, replacedL
 	return false, line
 }
 
-func replaceConf(r *regexp.Regexp, reader io.Reader) (hasDiff bool, replacedContent *bytes.Buffer, err error) {
+func replaceConf(r *regexp.Regexp, reader io.Reader) (hasDiff bool, replacedContent []byte, err error) {
 	scanner := bufio.NewScanner(reader)
 	writer := &bytes.Buffer{}
 	for scanner.Scan() {
@@ -66,9 +79,9 @@ func replaceConf(r *regexp.Regexp, reader io.Reader) (hasDiff bool, replacedCont
 		writer.WriteString(line + "\n")
 	}
 	if err = scanner.Err(); err != nil {
-		return hasDiff, writer, fmt.Errorf("Got error on scanning repoConfPath lines: %w", err)
+		return hasDiff, writer.Bytes(), fmt.Errorf("Got error on scanning repoConfPath lines: %w", err)
 	}
-	return hasDiff, writer, err
+	return hasDiff, writer.Bytes(), err
 }
 
 func checkUpToDateConfRepo(repoType, repoConfPath string) error {
@@ -83,21 +96,91 @@ func checkUpToDateConfRepo(repoType, repoConfPath string) error {
 		return nil
 	}
 
-	file, err := os.Open(repoConfPath)
+	// Getting original content
+	originalF, err := fsystem.Open(repoConfPath)
 	if err != nil {
 		return fmt.Errorf("Could not open repoConfPath: %w", err)
 	}
-	defer file.Close()
+	originalData, err := io.ReadAll(originalF)
+	if err != nil {
+		return fmt.Errorf("Could not read repoConfPath: %w", err)
+	}
 
-	hasDiff, newContent, err := replaceConf(r, file)
+	// Detecting diff
+	hasDiff, newContent, err := replaceConf(r, bytes.NewReader(originalData))
+	if err != nil {
+		return fmt.Errorf("Could not replaceConf: %w", err)
+	}
+	if !hasDiff {
+		return nil
+	}
 
-	// XXX: TODO
+	// Printing info about what is going on
+	fmt.Fprintf(stderr, "\n")
+	fmt.Fprintf(stderr, "\n")
+	fmt.Fprintf(stderr, "############## Breaking change ##############\n")
+	fmt.Fprintf(stderr, "  Tsuru-client appears to have been installed with a package manager (.%s)\n", repoType)
+	fmt.Fprintf(stderr, "  The packagecloud repository in-use suffered a breaking change (applied with tsuru-client:2.4.0)\n")
+	fmt.Fprintf(stderr, "  In order to receive future updates, the repo must be updated to use the any/any format (instead of os/distro)\n")
+	fmt.Fprintf(stderr, "  \n")
+	fmt.Fprintf(stderr, "  The content of %q, shall be replaced. Check the diff:\n", repoConfPath)
+	fmt.Fprintf(stderr, "#-----------------------------------------------------------------------#\n")
 
-	fmt.Println(newContent, hasDiff)
+	dif, err := diff.Diff(bytes.NewReader(originalData), bytes.NewReader(newContent))
+	if err != nil {
+		fmt.Fprintf(stderr, "    >> Got error executing diff: %v \n", err)
+	} else {
+		fmt.Fprintf(stderr, "%v", string(dif))
+	}
+
+	fmt.Fprintf(stderr, "#-----------------------------------------------------------------------#\n")
+	fmt.Fprintf(stderr, "  You may update it later and ignore this warning by setting the env TSURU_CLIENT_IGNORE_OUTDATED_PCLOUD_REPO=y\n")
+
+	// Asking for auto changes
+	answ := ""
+	scanner := bufio.NewScanner(stdin)
+	for answ != "yes" && answ != "no" {
+		fmt.Fprintf(stderr, "  Do you want to override the content now? (sudo will call for password) [yes/no] ")
+		scanner.Scan()
+		err1 := scanner.Err()
+		if err1 != nil {
+			return err1
+		}
+		answ = strings.TrimSpace(scanner.Text())
+	}
+	if answ != "yes" {
+		return nil
+	}
+
+	// Replacing the files
+	fmt.Fprintf(stderr, "  Writing %q (sudo password may be required) ...\n", repoConfPath)
+	if err1 := diff.ReplaceWithSudo(repoConfPath, bytes.NewReader(newContent)); err1 != nil {
+		return err1
+	}
+
+	// Verifying the replacement
+	replacedF, err := fsystem.Open(repoConfPath)
+	if err != nil {
+		return fmt.Errorf("replacement could not be confirmed: %w", err)
+	}
+	replacedData, err := io.ReadAll(replacedF)
+	if err != nil {
+		return fmt.Errorf("replacement could not be confirmed: %w", err)
+	}
+	hasDiff, _, err = replaceConf(r, bytes.NewReader(replacedData))
+	if err != nil {
+		return fmt.Errorf("replacement could not be confirmed: %w", err)
+	}
+	if hasDiff {
+		fmt.Fprintln(stderr, "conf replacement was not succeeded :(")
+	} else {
+		fmt.Fprintln(stderr, "Succeed!")
+	}
+
 	return nil
 }
 
-func CheckPackageCloudRepo() {
+func CheckPackageCloudRepo() error {
 	repoType, repoConfPath := findConfRepoPath()
-	checkUpToDateConfRepo(repoType, repoConfPath)
+	return checkUpToDateConfRepo(repoType, repoConfPath)
 }

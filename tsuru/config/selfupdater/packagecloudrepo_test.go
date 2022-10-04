@@ -1,8 +1,14 @@
+// Copyright 2022 tsuru-client authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package selfupdater
 
 import (
 	"regexp"
 	"strings"
+
+	"github.com/tsuru/tsuru/fs/fstest"
 
 	"gopkg.in/check.v1"
 )
@@ -147,13 +153,42 @@ func (s *S) TestReplaceConf(c *check.C) {
 	expected := strings.ReplaceAll(debSourceList, "ubuntu", "any")
 	expected = strings.ReplaceAll(expected, "bionic", "any")
 	c.Assert(hasDiff, check.Equals, true)
-	c.Assert(newContent.String(), check.Equals, expected)
+	c.Assert(string(newContent), check.Equals, expected)
 	c.Assert(err, check.IsNil)
 
 	hasDiff, newContent, err = replaceConf(regexp.MustCompile(rpmRE), strings.NewReader(rpmSourceList))
 	expected = strings.ReplaceAll(rpmSourceList, "opensuse", "any")
 	expected = strings.ReplaceAll(expected, "13.1", "any")
 	c.Assert(hasDiff, check.Equals, true)
-	c.Assert(newContent.String(), check.Equals, expected)
+	c.Assert(string(newContent), check.Equals, expected)
 	c.Assert(err, check.IsNil)
+}
+
+func (s *S) TestFindConfRepoPath(c *check.C) {
+	fsystem = &fstest.RecordingFs{}
+
+	for _, t := range []struct {
+		fname    string
+		expected string
+	}{
+		{"/etc/apt/sources.list.d/tsuru_stable.list", "deb"},
+		{"/etc/zypp/repos.d/tsuru_stable.repo", "rpm"},
+		{"/etc/yum.repos.d/tsuru_stable.repo", "rpm"},
+	} {
+		f, err := fsystem.Create(t.fname)
+		c.Assert(err, check.IsNil)
+		c.Assert(f.Name(), check.Equals, t.fname)
+
+		repoType, path := findConfRepoPath()
+		c.Assert(path, check.Equals, t.fname)
+		c.Assert(repoType, check.Equals, t.expected)
+
+		err = fsystem.Remove(t.fname)
+		c.Assert(err, check.IsNil)
+	}
+
+	// no file detected
+	repoType, path := findConfRepoPath()
+	c.Assert(path, check.Equals, "")
+	c.Assert(repoType, check.Equals, "")
 }
