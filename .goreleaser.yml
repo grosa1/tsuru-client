@@ -47,27 +47,3 @@ release:
   # If set to auto, will mark the release as not ready for production
   # in case there is an indicator for this in the tag e.g. v1.0.0-rc1
   prerelease: auto
-
-# Mac OS Homebrew
-brews:
-  # Reporitory to push the tap to.
-- tap:
-    owner: tsuru
-    name: homebrew-tsuru
-
-  description: "tsuru-client is a tsuru command line tool for application developers."
-  homepage: "https://docs.tsuru.io/stable/"
-
-  # Folder inside the repository to put the formula.
-  # Default is the root folder.
-  folder: Formula
-
-  # Custom install
-  install: |
-    bin.install "tsuru"
-    bash_completion.install "misc/bash-completion" => "tsuru"
-    zsh_completion.install "misc/zsh-completion" => "tsuru"
-
-  # If set to auto, the release will not be uploaded to the homebrew tap
-  # in case there is an indicator for prerelease in the tag e.g. v1.0.0-rc1
-  skip_upload: auto
